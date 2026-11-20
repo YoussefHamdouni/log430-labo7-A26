@@ -42,6 +42,32 @@ docker compose run --rm -p 8090:8089 locust -f /mnt/locust/locustfile.py UserLif
 
 ## Résultats
 
+Le test a été exécuté deux fois avec les mêmes paramètres : une première fois en mode `--headless` (pour l'historique `--csv` et les mesures `docker stats` / Kafka), puis dans l'interface web de Locust pour les captures. Les deux exécutions donnent le même comportement.
+
+### Exécution dans l'interface Locust (captures)
+
+| Requête | Requêtes | Échecs | Médiane | p95 | p99 | Moyenne | Max |
+|---|---|---|---|---|---|---|---|
+| `POST /users` | 4 503 | 737 | 190 ms | 990 ms | 1 900 ms | 349 ms | 2 150 ms |
+| `DELETE /users/[id]` | 2 108 | 346 | 210 ms | 1 000 ms | 1 900 ms | 347 ms | 2 175 ms |
+| **Total** | **6 611** | **1 083 (16 %)** | **200 ms** | **1 000 ms** | **1 900 ms** | **348 ms** | **2 175 ms** |
+
+Débit à la fin du test : 78,4 req/s, dont 25,8 échecs/s.
+
+![Locust – Statistics](captures/a8-statistics.webp)
+
+*Figure 1 – Onglet Statistics : 6 611 requêtes, 16 % d'échecs.*
+
+![Locust – Charts](captures/a8-charts.webp)
+
+*Figure 2 – Onglet Charts : aucun échec pendant la montée en charge, puis les premiers échecs vers 15:32:18, avec environ 120 utilisateurs. Le débit continue d'augmenter jusqu'à ~78 req/s.*
+
+![Locust – Failures](captures/a8-failures.webp)
+
+*Figure 3 – Onglet Failures : uniquement des erreurs MySQL 1040 « Too many connections », sur `POST /users` et `DELETE /users/[id]`.*
+
+### Première exécution (`--headless`)
+
 | Requête | Requêtes | Échecs | Médiane | p95 | Max | Débit |
 |---|---|---|---|---|---|---|
 | `POST /users` | 4 065 | 765 (18,8 %) | 390 ms | 2 000 ms | 2 800 ms | 34,0 req/s |
@@ -64,8 +90,8 @@ Ressources (`docker stats`, toutes les 15 s) : `store_manager` jusqu'à 323 % CP
 
 ## Observations
 
-1. **Jusqu'à ~100 utilisateurs, aucune erreur et des temps courts** (médiane 43 à 100 ms). La création d'un utilisateur est rapide, car le Store Manager publie l'événement dans Kafka sans attendre Coolriel (voir Q1).
-2. **Point de rupture à ~100 utilisateurs (t = 51 s)**, beaucoup plus tard qu'au labo 5 pour la création de commandes (~36 à 45 utilisateurs). Une création d'utilisateur ne fait qu'un `INSERT` et un `send()` Kafka, alors qu'une commande lit les produits, écrit plusieurs lignes et appelle le service de paiement en HTTP synchrone.
+1. **Jusqu'à 100 à 120 utilisateurs, aucune erreur et des temps courts** (médiane 43 à 100 ms). La création d'un utilisateur est rapide, car le Store Manager publie l'événement dans Kafka sans attendre Coolriel (voir Q1).
+2. **Point de rupture entre ~100 utilisateurs (première exécution, t = 51 s) et ~120 utilisateurs (exécution des captures, figure 2)**, beaucoup plus tard qu'au labo 5 pour la création de commandes (~36 à 45 utilisateurs). Une création d'utilisateur ne fait qu'un `INSERT` et un `send()` Kafka, alors qu'une commande lit les produits, écrit plusieurs lignes et appelle le service de paiement en HTTP synchrone.
 3. **Toutes les erreurs sont des `500 – Too many connections` (MySQL 1040)**, pour la création comme pour la suppression :
    ```txt
    466  POST /users: Erreur : 500 - (mysql.connector.errors.DatabaseError) 1040 (HY000): Too many connections
@@ -74,15 +100,15 @@ Ressources (`docker stats`, toutes les 15 s) : `store_manager` jusqu'à 323 % CP
    172  DELETE /users/[id]: Erreur : 500 - (mysql.connector.errors.OperationalError) 1040 (08004): Too many connections
    ```
    Le goulot est le même qu'aux labos 4 et 5 : `get_sqlalchemy_session()` crée un nouvel engine (et un nouveau pool de connexions) à chaque appel. Kafka n'y est pour rien. Cette fois, MySQL est revenu à la normale après le test (`Threads_connected = 7`, et un nouveau `POST /users` répond `201`).
-4. **Coolriel suit la charge sans difficulté.** À la fin du test, le groupe `coolriel-group` n'a **aucun retard** (`LAG = 0`) : les 3 305 événements du topic `user-events` ont tous produit un courriel (3 305 fichiers dans `output/`), avec moins de 7 % de CPU :
+4. **Coolriel suit la charge sans difficulté.** À la fin de la première exécution, le groupe `coolriel-group` n'a **aucun retard** (`LAG = 0`) : les 3 305 événements du topic `user-events` ont tous produit un courriel (3 305 fichiers dans `output/`), avec moins de 7 % de CPU :
    ```txt
    $ kafka-consumer-groups --describe --group coolriel-group
    GROUP           TOPIC        PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
    coolriel-group  user-events  0          3305            3305            0
    ```
    Même si Coolriel avait été plus lent, il n'aurait pas ralenti le Store Manager : les événements se seraient accumulés dans Kafka (le `LAG` aurait augmenté) et auraient été traités ensuite. C'est l'avantage du découplage asynchrone.
-5. **La base de données reste cohérente** : 5 utilisateurs avant le test, + 3 300 créations réussies, − 1 497 suppressions réussies = **1 808 utilisateurs** après, ce qui correspond exactement au compte dans MySQL.
-6. **Petite incohérence entre MySQL et Kafka** : 3 303 événements `UserCreated` ont été publiés pendant le test, alors que Locust ne compte que 3 300 créations réussies. Pour quelques requêtes, l'erreur 500 est arrivée **après** le `commit` et l'envoi à Kafka : le client a reçu une erreur, mais l'utilisateur existe et son courriel a été généré.
+5. **La base de données reste cohérente** (première exécution) : 5 utilisateurs avant le test, + 3 300 créations réussies, − 1 497 suppressions réussies = **1 808 utilisateurs** après, ce qui correspond exactement au compte dans MySQL.
+6. **Petite incohérence entre MySQL et Kafka** (première exécution) : 3 303 événements `UserCreated` ont été publiés pendant le test, alors que Locust ne compte que 3 300 créations réussies. Pour quelques requêtes, l'erreur 500 est arrivée **après** le `commit` et l'envoi à Kafka : le client a reçu une erreur, mais l'utilisateur existe et son courriel a été généré.
 7. Sur cette branche, `delete_user` ne publie pas encore `UserDeleted` (c'est fait dans `labo7-a2-a3-users`). Les suppressions ne génèrent donc pas de courriel d'au revoir dans ce test.
 
 ## Pistes d'amélioration
