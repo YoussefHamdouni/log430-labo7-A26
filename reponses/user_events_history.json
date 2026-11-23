@@ -1,0 +1,23 @@
+[
+  {
+    "event": "UserCreated",
+    "id": 4,
+    "name": "Test Un",
+    "email": "test1@exemple.ca",
+    "datetime": "2026-11-23 00:57:34.086307"
+  },
+  {
+    "event": "UserCreated",
+    "id": 5,
+    "name": "Test Deux",
+    "email": "test2@exemple.ca",
+    "datetime": "2026-11-23 00:58:03.618466"
+  },
+  {
+    "event": "UserCreated",
+    "id": 6,
+    "name": "Test Trois",
+    "email": "test3@exemple.ca",
+    "datetime": "2026-11-23 00:58:13.177749"
+  }
+]
